@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Topic -> script -> voice -> images -> video. Free stack: Gemini + Pollinations + FFmpeg."""
-import os, sys, re, json, time, wave, math, random, shutil, asyncio, subprocess, urllib.parse
+import os, sys, re, json, textwrap, time, wave, math, random, shutil, asyncio, subprocess, urllib.parse
 from pathlib import Path
 import requests
 from google import genai
@@ -8,7 +8,7 @@ from google.genai import types
 
 API_KEY = os.environ["GEMINI_API_KEY"]
 TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-flash-latest")
-TTS_MODEL = os.getenv("TTS_MODEL", "gemini-flash-latest")
+TTS_MODEL = os.getenv("TTS_MODEL", "")   # optional override; otherwise TTS_MODELS below are tried in order
 VOICE = os.getenv("VOICE", "Algieba")              # one fixed voice for the whole channel
 EDGE_VOICE = os.getenv("EDGE_VOICE", "en-US-GuyNeural")
 SECTIONS = int(os.getenv("SECTIONS", "8"))          # 8 sections ~ 45-50 min of audio
@@ -24,25 +24,69 @@ client = genai.Client(api_key=API_KEY)
 ROOT = Path(__file__).parent
 
 
+def discover_models():
+    """Ask Google which models THIS api key can use, so we never call a model that doesn't exist."""
+    text, tts = [], []
+    try:
+        for m in client.models.list():
+            name = m.name.replace("models/", "")
+            acts = getattr(m, "supported_actions", None) or []
+            if acts and "generateContent" not in acts:
+                continue
+            low = name.lower()
+            if "tts" in low:
+                tts.append(name)
+            elif "flash" in low and not any(x in low for x in
+                    ("image", "live", "audio", "native", "embedding", "robotics", "computer", "exp", "vision")):
+                text.append(name)
+    except Exception as e:
+        print("Could not list models:", str(e)[:150], flush=True)
+    order = lambda n: (("preview" in n), ("lite" in n), n)
+    text = sorted(set(text), key=order)[:4]
+    tts = sorted(set(tts), key=order)[:4]
+    return text, tts
+
+
+_text, _tts = discover_models()
+TEXT_MODELS = list(dict.fromkeys([TEXT_MODEL] + _text)) or ["gemini-2.5-flash"]
+TTS_MODELS = list(dict.fromkeys([m for m in [TTS_MODEL] if m] + _tts)) or ["gemini-2.5-flash-preview-tts"]
+print("TEXT models to try:", TEXT_MODELS, flush=True)
+print("TTS models to try:", TTS_MODELS, flush=True)
+
+
 def log(*a):
     print(*a, flush=True)
 
 
-def retry(fn, tries=5, base=20):
+TRANSIENT = ("503", "429", "500", "502", "504", "UNAVAILABLE", "overloaded", "RESOURCE_EXHAUSTED",
+             "timed out", "Connection", "DEADLINE")
+
+
+def retry(fn, tries=8, base=15):
     for i in range(tries):
         try:
             return fn()
         except Exception as e:
-            wait = base * (i + 1)
-            log(f"  retry {i+1}/{tries} after error: {str(e)[:150]} (sleep {wait}s)")
+            msg = str(e)
+            if i == tries - 1 or not any(t in msg for t in TRANSIENT):
+                raise
+            wait = min(base * 2 ** i, 180) + random.randint(0, 10)
+            log(f"  busy/error, retry {i+1}/{tries} in {wait}s: {msg[:120]}")
             time.sleep(wait)
-    raise RuntimeError("too many failures")
 
 
 def ask(prompt, json_out=False):
     cfg = types.GenerateContentConfig(response_mime_type="application/json") if json_out else None
-    r = retry(lambda: client.models.generate_content(model=TEXT_MODEL, contents=prompt, config=cfg))
-    return r.text.strip()
+    last = None
+    for model in TEXT_MODELS:
+        try:
+            r = retry(lambda m=model: client.models.generate_content(model=m, contents=prompt, config=cfg), tries=5)
+            if r.text:
+                return r.text.strip()
+        except Exception as e:
+            last = e
+            log(f"  model {model} failed, trying next: {str(e)[:120]}")
+    raise RuntimeError(f"All text models failed: {last}")
 
 
 def slugify(s):
@@ -50,17 +94,26 @@ def slugify(s):
 
 
 # ---------- 1. SCRIPT ----------
-def write_script(topic):
-    log("Outline...")
-    outline = json.loads(ask(
-        f'Plan a calm, factual history sleep story titled "{topic}". Return a JSON list of exactly {SECTIONS} '
-        f'objects with keys "title" and "summary" (1 sentence). The story drifts slowly through one place and '
-        f'time period, moving from gentle arrival to deep rest.', json_out=True))
+def write_script(topic, d):
+    of = d / "outline.json"
+    if of.exists():
+        outline = json.loads(of.read_text())
+    else:
+        log("Outline...")
+        outline = json.loads(ask(
+            f'Plan a calm, factual history sleep story titled "{topic}". Return a JSON list of exactly {SECTIONS} '
+            f'objects with keys "title" and "summary" (1 sentence). The story drifts slowly through one place and '
+            f'time period, moving from gentle arrival to deep rest.', json_out=True))
+        of.write_text(json.dumps(outline))
     parts, prev_tail = [], ""
     for i, sec in enumerate(outline, 1):
-        log(f"Section {i}/{len(outline)}: {sec['title']}")
-        last = (i == len(outline))
-        text = ask(f"""You are writing section {i} of {len(outline)} of a calm history sleep story: "{topic}".
+        sf = d / f"sec_{i:02d}.txt"
+        if sf.exists():
+            text = sf.read_text()
+        else:
+            log(f"Section {i}/{len(outline)}: {sec['title']}")
+            last = (i == len(outline))
+            text = ask(f"""You are writing section {i} of {len(outline)} of a calm history sleep story: "{topic}".
 Full outline: {json.dumps(outline)}
 This section: {sec['title']} - {sec['summary']}
 Previous section ended with: "{prev_tail}"
@@ -71,7 +124,9 @@ Rules:
 - Historically grounded. Only state details you are confident are accurate; when unsure, stay general. No invented statistics or dates dumps.
 - Nothing violent, frightening, or jarring. No cliffhangers.
 - Continue naturally from the previous section without recapping it.
+{"- This is the opening section: begin with a short, warm welcome to the listener (settle in, dim the lights, breathe slowly), then gently begin the journey." if i == 1 else ""}
 {"- This is the final section: slow down further and end with a soft, quiet fade into sleep." if last else ""}""")
+            sf.write_text(text)
         parts.append(text)
         prev_tail = text[-250:]
     return outline, "\n\n".join(parts)
@@ -92,17 +147,26 @@ def chunk_text(text, limit=2500):
 def tts_gemini(chunks, d):
     files = []
     for i, c in enumerate(chunks):
-        log(f"Gemini TTS {i+1}/{len(chunks)}")
-        def call():
-            return client.models.generate_content(
-                model=TTS_MODEL, contents=NARRATION_STYLE + c,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE)))))
-        r = retry(call, tries=4, base=30)
-        pcm = r.candidates[0].content.parts[0].inline_data.data
         f = d / f"voice_{i:03d}.wav"
+        if f.exists():
+            files.append(f); continue
+        log(f"Gemini TTS {i+1}/{len(chunks)}")
+        r = None
+        for model in TTS_MODELS:
+            try:
+                r = retry(lambda m=model: client.models.generate_content(
+                    model=m, contents=NARRATION_STYLE + c,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE))))),
+                    tries=4, base=30)
+                break
+            except Exception as e:
+                log(f"  TTS model {model} failed, trying next: {str(e)[:120]}")
+        if r is None:
+            raise RuntimeError("all Gemini TTS models failed")
+        pcm = r.candidates[0].content.parts[0].inline_data.data
         with wave.open(str(f), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
         files.append(f)
@@ -114,6 +178,8 @@ def tts_edge(chunks, d):
     import edge_tts
     files = []
     for i, c in enumerate(chunks):
+        if (d / f"voice_{i:03d}.wav").exists():
+            files.append(d / f"voice_{i:03d}.wav"); continue
         log(f"Edge-TTS {i+1}/{len(chunks)}")
         mp3 = d / f"voice_{i:03d}.mp3"
         asyncio.run(edge_tts.Communicate(c, EDGE_VOICE, rate="-15%", pitch="-5Hz").save(str(mp3)))
@@ -134,13 +200,22 @@ def make_voice(script, d):
         files = tts_edge(chunks, d)
     lst = d / "voice_list.txt"
     lst.write_text("".join(f"file '{f.resolve()}'\n" for f in files))
+    raw = d / "narration_raw.wav"
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(raw)])
     out = d / "narration.wav"
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)])
+    # even loudness + 6 seconds of quiet at the end
+    run(["ffmpeg", "-y", "-i", str(raw), "-af", "loudnorm=I=-20:LRA=7:TP=-2,apad=pad_dur=6", str(out)])
+    raw.unlink(missing_ok=True)
     return out
 
 
 # ---------- 3. IMAGES ----------
-def scene_prompts(topic, outline, n):
+def scene_prompts(topic, outline, n, d):
+    pf = d / "prompts.json"
+    if pf.exists():
+        cached = json.loads(pf.read_text())
+        if len(cached) == n:
+            return cached
     prompts, batch = [], 30
     for start in range(0, n, batch):
         end = min(n, start + batch)
@@ -152,6 +227,7 @@ Return a JSON list of exactly {end-start} strings.""", json_out=True)
         got = json.loads(txt)
         got = (got + got[-1:] * (end - start))[: end - start] if got else ["a quiet moonlit ancient landscape"] * (end - start)
         prompts += got
+    pf.write_text(json.dumps(prompts))
     return prompts
 
 
@@ -175,11 +251,13 @@ def make_image(prompt, path, seed):
 
 
 def make_images(topic, outline, n, d):
-    prompts = scene_prompts(topic, outline, n)
+    prompts = scene_prompts(topic, outline, n, d)
     imgs, last_ok = [], None
     for i, p in enumerate(prompts):
-        log(f"Image {i+1}/{n}")
         path = d / f"img_{i:03d}.jpg"
+        if path.exists() and path.stat().st_size > 1000:
+            imgs.append(path); last_ok = path; continue
+        log(f"Image {i+1}/{n}")
         if make_image(p, path, seed=random.randint(1, 10**6)):
             last_ok = path
         elif last_ok:
@@ -213,7 +291,7 @@ def render_clip(img, out, secs):
     vf = (f"scale=2560:1440,zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps={FPS},"
           f"fade=t=in:st=0:d=1.5,fade=t=out:st={max(secs-1.5,0):.2f}:d=1.5,format=yuv420p")
     run(["ffmpeg", "-y", "-i", str(img), "-vf", vf, "-frames:v", str(frames),
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "27", str(out)])
+         "-c:v", "libx264", "-preset", "faster", "-crf", "24", str(out)])
 
 
 def make_video(imgs, narration, out, d):
@@ -221,9 +299,10 @@ def make_video(imgs, narration, out, d):
     secs = total / len(imgs)
     clips = []
     for i, img in enumerate(imgs):
-        log(f"Clip {i+1}/{len(imgs)}")
         c = d / f"clip_{i:03d}.mp4"
-        render_clip(img, c, secs)
+        if not c.exists():
+            log(f"Clip {i+1}/{len(imgs)}")
+            render_clip(img, c, secs)
         clips.append(c)
     lst = d / "clips.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips))
@@ -234,7 +313,7 @@ def make_video(imgs, narration, out, d):
                 "[2:a]volume=0.08[m];[1:a][m]amix=inputs=2:duration=first:normalize=0[a]", "-map", "0:v", "-map", "[a]"]
     else:
         cmd += ["-map", "0:v", "-map", "1:a"]
-    cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", str(out)]
+    cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", str(out)]
     run(cmd)
     for c in clips:
         c.unlink()
@@ -248,6 +327,22 @@ Return JSON with keys: "title" (max 70 chars, like "Fall Asleep to {topic} | Cal
 "tags" (list of 12 short tags).""", json_out=True))
     m["description"] += "\n\nNarration and visuals in this video are AI-generated. Educational, relaxing history storytelling."
     return m
+
+
+# ---------- 6. THUMBNAIL ----------
+def make_thumbnail(img, topic, out, d):
+    try:
+        tf = d / "thumb_text.txt"
+        tf.write_text("\n".join(textwrap.wrap(topic.upper(), 18)))
+        vf = ("scale=1280:720,eq=brightness=-0.10:saturation=1.1,"
+              "drawbox=x=0:y=ih*0.52:w=iw:h=ih*0.48:color=black@0.5:t=fill,"
+              f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile={tf}:"
+              "fontcolor=white:fontsize=80:x=(w-text_w)/2:y=h*0.60:line_spacing=14:borderw=3:bordercolor=black")
+        run(["ffmpeg", "-y", "-i", str(img), "-vf", vf, "-frames:v", "1", "-q:v", "2", str(out)])
+        tf.unlink(missing_ok=True)
+    except Exception as e:
+        log("Thumbnail text failed, using plain image:", str(e)[:150])
+        shutil.copy(img, out)
 
 
 # ---------- MAIN ----------
@@ -267,7 +362,7 @@ def main():
     d = ROOT / "output" / slugify(topic)
     d.mkdir(parents=True, exist_ok=True)
 
-    outline, script = write_script(topic)
+    outline, script = write_script(topic, d)
     (d / "script.txt").write_text(script)
     narration = make_voice(script, d)
     n = math.ceil(duration(narration) / IMAGE_SECONDS)
@@ -275,8 +370,10 @@ def main():
     make_video(imgs, narration, d / "video.mp4", d)
     meta = make_metadata(topic, outline)
     (d / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
-    shutil.copy(imgs[0], d / "thumbnail_base.jpg")
+    make_thumbnail(imgs[min(2, len(imgs) - 1)], topic, d / "thumbnail.jpg", d)
     for f in list(d.glob("voice_*")) + [d / "voice_list.txt", d / "clips.txt"]:
+        f.unlink(missing_ok=True)
+    for f in list(d.glob("sec_*.txt")) + [d / "outline.json", d / "prompts.json"]:
         f.unlink(missing_ok=True)
     with open(ROOT / "done.txt", "a") as f:
         f.write(topic + "\n")
