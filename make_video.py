@@ -7,8 +7,8 @@ from google import genai
 from google.genai import types
 
 API_KEY = os.environ["GEMINI_API_KEY"]
-TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-2.5-flash")
-TTS_MODEL = os.getenv("TTS_MODEL", "gemini-2.5-flash-preview-tts")
+TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-flash-latest")
+TTS_MODEL = os.getenv("TTS_MODEL", "gemini-flash-latest")
 VOICE = os.getenv("VOICE", "Algieba")              # one fixed voice for the whole channel
 EDGE_VOICE = os.getenv("EDGE_VOICE", "en-US-GuyNeural")
 SECTIONS = int(os.getenv("SECTIONS", "8"))          # 8 sections ~ 45-50 min of audio
