@@ -13,7 +13,7 @@ VOICE = os.getenv("VOICE", "Algieba")              # one fixed voice for the who
 EDGE_VOICE = os.getenv("EDGE_VOICE", "en-US-GuyNeural")
 SECTIONS = int(os.getenv("SECTIONS", "8"))          # 8 sections ~ 45-50 min of audio
 WORDS_PER_SECTION = int(os.getenv("WORDS_PER_SECTION", "800"))
-IMAGE_SECONDS = int(os.getenv("IMAGE_SECONDS", "40"))
+IMAGE_SECONDS = int(os.getenv("IMAGE_SECONDS", "25"))
 FPS = 15
 STYLE = os.getenv("STYLE", "soft painterly digital illustration, warm candlelight, deep blue and amber tones, "
                            "serene, dim lighting, wide landscape composition, no text, no close-up faces")
@@ -370,7 +370,8 @@ def main():
     make_video(imgs, narration, d / "video.mp4", d)
     meta = make_metadata(topic, outline)
     (d / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
-    make_thumbnail(imgs[min(2, len(imgs) - 1)], topic, d / "thumbnail.jpg", d)
+    for k, pos in enumerate((0.15, 0.45, 0.75)):
+        make_thumbnail(imgs[min(int(len(imgs) * pos), len(imgs) - 1)], topic, d / f"thumbnail_{'abc'[k]}.jpg", d)
     for f in list(d.glob("voice_*")) + [d / "voice_list.txt", d / "clips.txt"]:
         f.unlink(missing_ok=True)
     for f in list(d.glob("sec_*.txt")) + [d / "outline.json", d / "prompts.json"]:
