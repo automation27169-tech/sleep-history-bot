@@ -24,13 +24,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install ffmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
       - run: pip install -r requirements.txt
       - name: Build video
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TOPIC: ${{ inputs.topic }}
           SECTIONS: ${{ inputs.sections || '8' }}
-        run: python make_video.py "$TOPIC"
+        run: |
+          for i in 1 2 3; do
+            python make_video.py "$TOPIC" && exit 0
+            echo "Attempt $i failed, waiting 3 minutes..."
+            sleep 180
+          done
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: video
