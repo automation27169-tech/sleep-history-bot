@@ -1,0 +1,88 @@
+name: Make video
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan = script + voice + prompt list | assemble = build the video from your uploaded media | auto = everything automatic"
+        type: choice
+        default: plan
+        options:
+          - plan
+          - assemble
+          - auto
+      topic:
+        description: "Topic (leave empty to take the next one from topics.txt)"
+        required: false
+        default: ""
+      sections:
+        description: "Story sections (3 = quick test, 8 = about 45 min)"
+        required: false
+        default: "8"
+      plan_run_id:
+        description: "assemble only: number at the end of the web address of your plan run"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ffmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - run: pip install -r requirements.txt
+      - name: Depth model for real 3D drone shots (optional)
+        continue-on-error: true
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers
+      - name: Get the plan from the earlier run
+        if: ${{ inputs.mode == 'assemble' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: output
+          path: plan_in
+          run-id: ${{ inputs.plan_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+      - name: Build
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TOPIC: ${{ inputs.topic }}
+          SECTIONS: ${{ inputs.sections || '8' }}
+          MODE: ${{ inputs.mode || 'auto' }}
+          PLAN_DIR: plan_in
+        run: |
+          for i in 1 2 3; do
+            python make_video.py "$TOPIC" && exit 0
+            echo "Attempt $i failed, waiting 3 minutes..."
+            sleep 180
+          done
+          exit 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: output
+          path: output/
+          retention-days: 30
+      - name: Save progress and clear media
+        run: |
+          touch done.txt
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add done.txt
+          if [ "${{ inputs.mode }}" = "assemble" ]; then
+            git ls-files media | grep -v '^media/README.txt$' | xargs -r -d '\n' git rm -q -f
+          fi
+          git diff --cached --quiet || (git commit -m "progress" && git push)
+          
