@@ -13,6 +13,7 @@ TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-flash-latest")
 TTS_MODEL = os.getenv("TTS_MODEL", "")   # optional override; otherwise TTS_MODELS below are tried in order
 VOICE = os.getenv("VOICE", "Algieba")              # one fixed voice for the whole channel
 EDGE_VOICE = os.getenv("EDGE_VOICE", "en-US-GuyNeural")
+STORY_STYLE = os.getenv("STORY_STYLE", "documentary").lower()   # documentary | story (second-person "You walk...")
 SECTIONS = int(os.getenv("SECTIONS", "8"))          # 8 sections ~ 45-50 min of audio
 WORDS_PER_SECTION = int(os.getenv("WORDS_PER_SECTION", "800"))
 IMAGE_SECONDS = int(os.getenv("IMAGE_SECONDS", "40" if os.getenv("MODE", "auto").lower() == "plan" else "25"))
@@ -121,10 +122,16 @@ def write_script(topic, d):
         outline = json.loads(of.read_text())
     else:
         log("Outline...")
-        outline = json.loads(ask(
-            f'Plan a calm, factual history sleep story titled "{topic}". Return a JSON list of exactly {SECTIONS} '
-            f'objects with keys "title" and "summary" (1 sentence). The story drifts slowly through one place and '
-            f'time period, moving from gentle arrival to deep rest.', json_out=True))
+        if STORY_STYLE == "story":
+            outline_prompt = (f'Plan a calm, factual history sleep story titled "{topic}". Return a JSON list of exactly {SECTIONS} '
+                              f'objects with keys "title" and "summary" (1 sentence). The story drifts slowly through one place and '
+                              f'time period, moving from gentle arrival to deep rest.')
+        else:
+            outline_prompt = (f'Plan a calm, curious, factual history documentary for sleep titled "{topic}". Return a JSON list of exactly '
+                              f'{SECTIONS} objects with keys "title" and "summary" (1 sentence). Each section covers a different aspect, '
+                              f'example or era of the topic (if the title is a list like "15 things", cover the items across the sections). '
+                              f'Start with a gentle introduction and end with a slow, quiet wrap-up.')
+        outline = json.loads(ask(outline_prompt, json_out=True))
         of.write_text(json.dumps(outline))
     parts, prev_tail = [], ""
     for i, sec in enumerate(outline, 1):
@@ -134,18 +141,22 @@ def write_script(topic, d):
         else:
             log(f"Section {i}/{len(outline)}: {sec['title']}")
             last = (i == len(outline))
-            text = ask(f"""You are writing section {i} of {len(outline)} of a calm history sleep story: "{topic}".
+            STYLE_RULES = ('- Second person, present tense ("You walk..."). Short, slow, gentle sentences. Rich sensory detail (light, sound, smell, warmth).'
+                           if STORY_STYLE == "story" else
+                           '- Calm, slow, warm documentary narration in third person, like a bedtime history lecture (you may say "imagine" now and then). '
+                           'Rich concrete everyday detail: work, food, objects, smells, sounds, customs, with gentle curiosity and a little dry humour. Never rushed.')
+            text = ask(f"""You are writing section {i} of {len(outline)} of a calm history documentary for sleep: "{topic}".
 Full outline: {json.dumps(outline)}
 This section: {sec['title']} - {sec['summary']}
 Previous section ended with: "{prev_tail}"
 
 Rules:
 - About {WORDS_PER_SECTION} words, plain paragraphs only, no headings, no markdown, no lists.
-- Second person, present tense ("You walk..."). Short, slow, gentle sentences. Rich sensory detail (light, sound, smell, warmth).
+{STYLE_RULES}
 - Historically grounded. Only state details you are confident are accurate; when unsure, stay general. No invented statistics or dates dumps.
-- Nothing violent, frightening, or jarring. No cliffhangers.
+- Nothing graphic, violent or frightening. Dark topics are handled gently and matter-of-factly. No cliffhangers.
 - Continue naturally from the previous section without recapping it.
-{"- This is the opening section: begin with a short, warm welcome to the listener (settle in, dim the lights, breathe slowly), then gently begin the journey." if i == 1 else ""}
+{"- This is the opening section: begin with a short, warm welcome to the listener (settle in, dim the lights, breathe slowly), then gently introduce what tonight's video is about." if i == 1 else ""}
 {"- This is the final section: slow down further and end with a soft, quiet fade into sleep." if last else ""}""")
             sf.write_text(text)
         parts.append(text)
@@ -994,7 +1005,7 @@ def fmt_chapter(t):
 
 def make_metadata(topic, outline, chapters):
     m = json.loads(ask(f"""YouTube metadata for a calm history sleep story about "{topic}" (US audience).
-Return JSON with keys: "title" (max 70 chars, like "Fall Asleep to {topic} | Calm History Sleep Story"),
+Return JSON with keys: "title" (max 70 chars, like "{topic} | Relaxing History for Sleep"),
 "description" (3-4 calm sentences only, no chapter list),
 "tags" (list of 12 short tags).""", json_out=True))
     if chapters:
