@@ -1,7 +1,0 @@
-google-genai
-requests
-edge-tts
-numpy
-opencv-python-headless
-pillow
-faster-whisper
