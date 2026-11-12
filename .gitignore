@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.tox/
+.venv/
+venv/
+env/
+
+# Output directories
+output/
+media/
+plans/
+logs/
+data/cache/
+
+# Checkpoints
+**/checkpoints/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Video/audio temp files
+*.tmp
+*.temp
+voice_*.wav
+narration_*.wav
+*.mp4
+*.mp3
+*.srt
