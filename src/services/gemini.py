@@ -1,8 +1,9 @@
-"""Google Gemini API wrapper with retry logic and model fallback."""
+"""Google Gemini API wrapper with retry logic, model fallback, and caching."""
 import os
 import time
 import random
 import logging
+import hashlib
 from typing import List, Optional, Dict, Any, AsyncGenerator
 from pathlib import Path
 
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 TRANSIENT_ERRORS = (
     "503", "429", "500", "502", "504", "UNAVAILABLE", "overloaded",
     "RESOURCE_EXHAUSTED", "timed out", "Connection", "DEADLINE_EXCEEDED",
-    "internal error", "service unavailable"
+    "internal error", "service unavailable", "rate limit"
 )
 
 
@@ -35,7 +36,7 @@ class GeminiClient:
         self.config = get_config()
         self.cache = get_cache()
         
-        # Model lists from config with fallbacks
+        # Model lists from config with fallbacks (matching old implementation)
         self.text_models = self.config.get('gemini', 'text_models', default=[
             "gemini-2.5-flash",
             "gemini-2.0-flash",
@@ -181,7 +182,7 @@ class GeminiClient:
             cached = self.cache.get(cache_key)
             if cached is not None:
                 logger.debug("Cache hit for TTS")
-                return bytes(cached)  # Convert back to bytes
+                return bytes(cached)
         
         def call_model(model: str) -> bytes:
             response = self.client.models.generate_content(
@@ -254,9 +255,6 @@ class GeminiClient:
         return image_data
 
 
-import hashlib
-
-# Convenience function for backward compatibility
 def get_gemini_client() -> GeminiClient:
     """Get or create Gemini client instance."""
     return GeminiClient()

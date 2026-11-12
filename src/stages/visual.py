@@ -1,4 +1,4 @@
-"""Visual stage: scene building, prompt generation, image generation, thumbnails."""
+"""Visual stage: Scene building, advanced prompt generation, image generation, thumbnails."""
 import logging
 import json
 import hashlib
@@ -13,21 +13,35 @@ from ..core.models import VisualCheckpoint, Scene, ThumbnailVariant, VisualStyle
 from ..services.gemini import get_gemini_client
 from ..services.pollinations import get_pollinations_client
 from ..services.cache import get_image_cache
-from ..utils.text import split_sentences, slugify
+from ..utils.text import split_sentences, slugify, wrap_text
 
 logger = logging.getLogger(__name__)
 
+# Style definitions matching the old implementation
 STYLES = {
-    VisualStyle.CINEMATIC: "dark moody cinematic photoreal film still, muted desaturated colours, dramatic low-key lighting, warm lantern glow, fine film grain, figures seen from behind or in silhouette or far away, no visible faces, no text, no watermark",
-    VisualStyle.MANUSCRIPT: "medieval illuminated manuscript style illustration, flat gouache colours, small detailed figures, ornate decorative border, aged parchment, no text, no watermark",
-    VisualStyle.ENGRAVING: "black and white 19th century etching engraving illustration, fine crosshatching, aged paper, detailed, no text, no watermark",
+    VisualStyle.CINEMATIC: ("dark moody cinematic photoreal film still, muted desaturated colours, "
+                            "dramatic low-key lighting, warm lantern glow, fine film grain, "
+                            "figures seen from behind or in silhouette or far away, "
+                            "no visible faces, no text, no watermark"),
+    VisualStyle.MANUSCRIPT: ("medieval illuminated manuscript style illustration, flat gouache colours, "
+                             "small detailed figures, ornate decorative border, aged parchment, "
+                             "no text, no watermark"),
+    VisualStyle.ENGRAVING: ("black and white 19th century etching engraving illustration, "
+                            "fine crosshatching, aged paper, detailed, no text, no watermark"),
 }
 
 STYLE_ORDER = [VisualStyle.CINEMATIC, VisualStyle.MANUSCRIPT, VisualStyle.CINEMATIC, VisualStyle.ENGRAVING, VisualStyle.MANUSCRIPT]
 
+# Motion prompts for video clips (from old implementation)
+MOTION_PROMPTS = {
+    VisualStyle.CINEMATIC: "Slow cinematic camera push-in. Candle or firelight flickers softly, fog and dust drift through the air, tiny embers float upwards. Subtle natural movement only, no cuts, no text, no new objects.",
+    VisualStyle.MANUSCRIPT: "Gently animate this medieval painting: small figures move slightly, smoke rises, flames flicker, slow camera drift. Keep the painted style exactly, no cuts, no text.",
+    VisualStyle.ENGRAVING: "Gently animate this engraving: slight movement of figures and animals, smoke or steam rising, slow camera drift. Keep the black and white etched style exactly, no cuts, no text.",
+}
+
 
 class VisualStage:
-    """Visual generation stage handler."""
+    """Visual generation stage handler with advanced prompting."""
     
     def __init__(self, output_dir: Path, topic_slug: str):
         self.output_dir = output_dir
@@ -45,6 +59,12 @@ class VisualStage:
         self.broll_every = self.config.get('visual', 'broll_every', default=3)
         self.crop_right = self.config.get('visual', 'crop_right', default=0.15)
         self.crop_bottom = self.config.get('visual', 'crop_bottom', default=0.06)
+        
+        # Thumbnail settings
+        self.thumb_resolution = self.config.get('thumbnails', 'resolution', default=[1280, 720])
+        self.thumb_variants = self.config.get('thumbnails', 'variants', default=3)
+        self.font_path = self.config.get('thumbnails', 'font_path', 
+            default="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
     
     def build_scenes(self, sentences: List[Dict[str, Any]]) -> List[Scene]:
         """Build scenes from timestamped sentences."""
@@ -65,14 +85,13 @@ class VisualStage:
                 should_split = True
             
             if should_split:
-                # Create scene
                 scene_text = " ".join(s['text'] for s in current_scene)
                 scenes.append(Scene(
                     index=len(scenes),
                     start=scene_start,
                     end=sent['end'],
                     text=scene_text,
-                    prompt="",  # Will be filled later
+                    prompt="",
                     style=STYLE_ORDER[len(scenes) % len(STYLE_ORDER)]
                 ))
                 current_scene = []
@@ -106,12 +125,7 @@ class VisualStage:
         return scenes
     
     def generate_prompts(self, topic: str, scenes: List[Scene]) -> List[Scene]:
-        """Generate image prompts for each scene."""
-        cache_key = f"prompts|{self.topic_slug}"
-        
-        cached = self.image_cache.get_image_path(cache_key) if False else None  # Don't cache prompts
-        prompts = None
-        
+        """Generate sophisticated image prompts for each scene."""
         # Check for cached prompts in checkpoint
         visual_checkpoint = self.checkpoint_mgr.load('visual')
         if visual_checkpoint and 'scenes' in visual_checkpoint:
@@ -162,9 +176,13 @@ Passages:
         return scenes
     
     def build_full_prompt(self, scene: Scene) -> str:
-        """Build full image generation prompt."""
+        """Build full image generation prompt with style."""
         style_prompt = STYLES.get(scene.style, STYLES[VisualStyle.CINEMATIC])
         return f"{scene.prompt}. {style_prompt}. Wide 16:9 landscape image, cinematic composition, high detail."
+    
+    def get_motion_prompt(self, style: VisualStyle) -> str:
+        """Get motion prompt for video clip generation."""
+        return MOTION_PROMPTS.get(style, MOTION_PROMPTS[VisualStyle.CINEMATIC])
     
     def generate_images(self, topic: str, scenes: List[Scene]) -> List[Scene]:
         """Generate images for all scenes using Pollinations."""
@@ -186,7 +204,6 @@ Passages:
             cached_path = self.image_cache.get_image_path(cache_key)
             if cached_path and cached_path.exists():
                 logger.debug(f"Using cached image for scene {scene.index}")
-                # Copy to output
                 import shutil
                 shutil.copy2(cached_path, img_path)
                 scene.image_path = str(img_path)
@@ -229,17 +246,17 @@ Passages:
         return scenes
     
     def generate_thumbnails(self, topic: str, scenes: List[Scene], duration_min: int) -> List[ThumbnailVariant]:
-        """Generate thumbnail variants."""
+        """Generate thumbnail variants (PIL + optional Gemini)."""
         from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageOps
         import numpy as np
         
         output_dir = self.output_dir / self.topic_slug
         thumbnails = []
         
-        # Use images from different parts of the video
         if not scenes:
             return thumbnails
         
+        # Use images from different parts of the video
         indices = [0, len(scenes)//2, -1] if len(scenes) >= 3 else [0, 0, 0]
         variants = ['a', 'b', 'c']
         
@@ -262,7 +279,7 @@ Passages:
                     im = im.crop((0, 0, int(w * (1 - self.crop_right)), int(h * (1 - self.crop_bottom))))
                 
                 # Resize to thumbnail resolution
-                thumb_w, thumb_h = 1280, 720
+                thumb_w, thumb_h = self.thumb_resolution
                 im = ImageOps.fit(im, (thumb_w, thumb_h), Image.LANCZOS)
                 
                 # Enhance
@@ -292,10 +309,8 @@ Passages:
                 draw = ImageDraw.Draw(im)
                 
                 # Try to load font
-                font_path = self.config.get('thumbnails', 'font_path', 
-                    default="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
                 try:
-                    font = ImageFont.truetype(font_path, 130)
+                    font = ImageFont.truetype(self.font_path, 130)
                 except:
                     font = ImageFont.load_default()
                 
@@ -313,7 +328,10 @@ Passages:
                 
                 # Add badge
                 badge_text = f"{duration_min} MIN SLEEP STORY"
-                badge_font = ImageFont.truetype(font_path, 36) if 'font' in locals() else font
+                try:
+                    badge_font = ImageFont.truetype(self.font_path, 36)
+                except:
+                    badge_font = font
                 bw = draw.textlength(badge_text, font=badge_font)
                 bx = 60 if variant == 'a' else (thumb_w - 60 - bw - 40 if variant == 'b' else (thumb_w - bw - 40) / 2)
                 draw.rounded_rectangle((bx, 48, bx + bw + 40, 48 + 62), radius=30, 
@@ -352,6 +370,12 @@ Passages:
         
         # Generate thumbnails
         thumbnails = self.generate_thumbnails(topic, scenes, duration_min)
+        
+        # Also generate motion prompts for broll clips
+        for scene in scenes:
+            if scene.index % self.broll_every == 0:
+                scene.prompt_params = scene.prompt_params or {}
+                scene.prompt_params['motion_prompt'] = self.get_motion_prompt(scene.style)
         
         checkpoint = VisualCheckpoint(
             scenes=[s.model_dump() for s in scenes],

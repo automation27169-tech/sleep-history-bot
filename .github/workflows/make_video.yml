@@ -16,6 +16,8 @@ on:
           - visual        # Image generation
           - video         # Video rendering
           - publish       # Metadata + quality checks
+          - plan          # Generate prompts list for manual creation
+          - assemble      # Build video from user media
       topic:
         description: "Topic (empty = next from topics.txt)"
         required: false
@@ -26,6 +28,10 @@ on:
         default: ""
       stages:
         description: "Comma-separated stages to run (for full mode)"
+        required: false
+        default: ""
+      plan_dir:
+        description: "Plan directory for assemble mode"
         required: false
         default: ""
       force:
@@ -62,8 +68,8 @@ jobs:
         run: |
           pip install -r requirements.txt
       
-      - name: Install ML dependencies (for video stage)
-        if: ${{ inputs.mode != 'research' && inputs.mode != 'script' }}
+      - name: Install ML dependencies (for video stage 3D depth)
+        if: ${{ inputs.mode != 'research' && inputs.mode != 'script' && inputs.mode != 'plan' }}
         continue-on-error: true
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -76,21 +82,38 @@ jobs:
           name: checkpoint-${{ inputs.resume_from }}
           path: output/
       
+      - name: Download plan artifact for assemble
+        if: ${{ inputs.mode == 'assemble' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: output
+          path: plan_in
+          run-id: ${{ inputs.plan_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+      
       - name: Run Pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TOPIC: ${{ inputs.topic }}
-          MODE: ${{ inputs.mode }}
         run: |
-          CMD="python main.py full --output output"
-          if [ -n "${{ inputs.topic }}" ]; then
-            CMD="$CMD --topic \"${{ inputs.topic }}\""
+          MODE="${{ inputs.mode }}"
+          TOPIC="${{ inputs.topic }}"
+          RESUME_FROM="${{ inputs.resume_from }}"
+          STAGES="${{ inputs.stages }}"
+          PLAN_DIR="${{ inputs.plan_dir }}"
+          
+          CMD="python main.py $MODE --output output"
+          if [ -n "$TOPIC" ]; then
+            CMD="$CMD --topic \"$TOPIC\""
           fi
-          if [ -n "${{ inputs.resume_from }}" ]; then
-            CMD="$CMD --resume-from ${{ inputs.resume_from }}"
+          if [ -n "$RESUME_FROM" ]; then
+            CMD="$CMD --resume-from $RESUME_FROM"
           fi
-          if [ -n "${{ inputs.stages }}" ]; then
-            CMD="$CMD --stages ${{ inputs.stages }}"
+          if [ -n "$STAGES" ]; then
+            CMD="$CMD --stages $STAGES"
+          fi
+          if [ -n "$PLAN_DIR" ]; then
+            CMD="$CMD --plan-dir $PLAN_DIR"
           fi
           echo "Running: $CMD"
           
@@ -111,7 +134,7 @@ jobs:
           retention-days: 30
       
       - name: Upload output artifact
-        if: ${{ inputs.mode == 'full' || inputs.mode == 'video' || inputs.mode == 'publish' }}
+        if: ${{ inputs.mode == 'full' || inputs.mode == 'video' || inputs.mode == 'publish' || inputs.mode == 'plan' || inputs.mode == 'assemble' }}
         uses: actions/upload-artifact@v4
         with:
           name: output
@@ -119,13 +142,13 @@ jobs:
           retention-days: 30
       
       - name: Save progress and clear media
-        if: ${{ inputs.mode == 'full' || inputs.mode == 'publish' }}
+        if: ${{ inputs.mode == 'full' || inputs.mode == 'publish' || inputs.mode == 'assemble' }}
         run: |
           touch done.txt
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
           git add done.txt
-          if [ "${{ inputs.mode }}" = "full" ]; then
+          if [ "${{ inputs.mode }}" = "full" ] || [ "${{ inputs.mode }}" = "assemble" ]; then
             git ls-files media | grep -v '^media/README.txt$' | xargs -r -d '\n' git rm -q -f 2>/dev/null || true
           fi
           git diff --cached --quiet || (git commit -m "progress: ${{ inputs.topic || 'auto' }}" && git push)
