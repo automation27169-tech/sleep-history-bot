@@ -1,7 +1,21 @@
-google-genai
-requests
-edge-tts
-numpy
-opencv-python-headless
-pillow
-faster-whisper
+# Core
+google-genai>=1.0.0
+requests>=2.31.0
+pyyaml>=6.0
+
+# TTS
+edge-tts>=6.1.0
+
+# Audio/Video
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+pillow>=10.0.0
+faster-whisper>=1.0.0
+
+# ML (optional, for video stage 3D depth)
+# torch>=2.0.0 --index-url https://download.pytorch.org/whl/cpu
+# transformers>=4.30.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
